@@ -1,0 +1,150 @@
+
+```{r}
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(osmdata)
+
+# 读取行政区边界
+boroughs <- read_sf("C:/Users/29383/Desktop/data/data/geo/Boroughs.gpkg") |>
+  st_transform("EPSG:27700")
+
+# 读取碰撞数据
+data1819 <- read_csv("C:/Users/29383/Desktop/data/1819.csv") |>
+  st_as_sf(coords = c("EASTING", "NORTHING"), crs = 27700) |>
+  st_transform("EPSG:27700") |>
+  st_intersection(boroughs)
+
+```
+
+```{r}
+# 创建一个加权列，3 是最严重的
+data1819 <- data1819 %>%
+  mutate(weighted_severity = case_when(
+    'CASUALTY SEVERITY' == 1 ~ 1,
+    'CASUALTY SEVERITY' == 2 ~ 2,
+    'CASUALTY SEVERITY' == 3 ~ 3,
+    TRUE ~ 1  # 默认值，如果严重程度不在 1-3 之间
+  ))
+
+```
+
+```{r}
+# 获取建筑物数据
+london_buildings <- boroughs |>
+  st_transform("EPSG:4326") |>
+  st_bbox() |>
+  opq() |>
+  add_osm_feature(key = "building") |>
+  osmdata_sf()
+
+# 计算建筑物的质心
+london_building_centroids <- london_buildings$osm_polygons %>%
+  st_centroid() %>%
+  st_transform("EPSG:27700")
+
+
+```
+
+```{r}
+ggplot() +
+  annotation_map_tile(type = "cartodark", zoomin = 0, progress = "none") +
+  # Add building features stored as points
+  geom_sf(
+    data = pluck(london_buildings, "osm_points"), 
+    colour = "green",
+    size = 0.1
+  ) +
+  # Add building features stored as polygons
+  geom_sf(
+    data = pluck(london_buildings, "osm_polygons"), 
+    colour = NA,
+    fill = "blue"
+  ) + 
+  # Add building features stored as multi-polygons
+  geom_sf(
+    data = pluck(london_buildings, "osm_multipolygons"), 
+    colour = NA,
+    fill = "darkred"
+  ) +
+  geom_sf(data = wards, colour = "red", fill = NA, linewidth = 1.25) +
+  theme_void()
+```
+
+```{r}
+library(SpatialKDE)
+
+# 创建一个网格
+grid <- st_make_grid(boroughs, cellsize = 500, what = "centers")
+
+# 转换为数据框
+grid_df <- as.data.frame(st_coordinates(grid))
+names(grid_df) <- c("x", "y")
+
+# 使用加权数据进行内核密度估计
+kde_result <- SpatialKDE::kde(
+  data = st_coordinates(data1819),
+  band_width = 500,
+  weight = data1819$weighted_severity,
+  grid = grid_df
+)
+
+# 将结果转换为sf对象
+kde_sf <- st_as_sf(kde_result, coords = c("x", "y"), crs = st_crs(boroughs), remove = FALSE)
+
+```
+
+```{r}
+head(collision_risk)
+```
+
+```{r}
+collision_risk <- hotspot_dual_kde(
+  boroughs, 
+  london_building_centroids, 
+  bandwidth_adjust = 0.25, 
+  grid = hotspot_grid(boroughs, cell_size = 100)
+) |> 
+  st_intersection(boroughs)
+
+collision_risk_filtered <- filter(collision_risk, is.finite(kde))
+```
+
+```{r}
+ggplot() +
+  annotation_map_tile(type = "cartolight", zoomin = 0, progress = "none") +
+  # Add  risk layer
+  geom_sf(
+    aes(fill = kde), 
+    data = collision_risk_filtered, 
+    alpha = 0.8, 
+    colour = NA
+  ) +
+  # Add boundaries
+  geom_sf(data = boroughs, fill = NA) + 
+  scale_fill_distiller(
+    breaks = range(pull(collision_risk_filtered, "kde")),
+    labels = c("lower", "higher"),
+    direction = 1
+  ) +
+  labs(
+      title = "i dont know",
+      subtitle = str_glue(
+        "dual kernel density of collison risk",
+        "what"
+      ),
+      caption = str_glue(
+        "Contains public sector information licensed under the Open ",
+        "Government Licence v3.0"
+      ),
+      fill = "density of collision risk, 1819"
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    plot.caption = element_text(colour = "grey40"),
+    plot.subtitle = element_text(margin = margin(t = 6, b = 6)),
+    plot.title = element_text(colour = "grey50", face = "bold", size = 16)
+  )
+```
+
